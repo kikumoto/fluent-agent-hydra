@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/fujiwara/fluent-agent-hydra/fluent"
-	"gopkg.in/fsnotify.v1"
+	"gopkg.in/fsnotify.v0"
 )
 
 const (
@@ -24,7 +24,7 @@ type InTail struct {
 	lastReadAt     time.Time
 	messageCh      chan *fluent.FluentRecordSet
 	monitorCh      chan Stat
-	eventCh        chan fsnotify.Event
+	eventCh        chan fsnotify.FileEvent
 	format         FileFormat
 	recordModifier *RecordModifier
 	regexp         *Regexp
@@ -34,7 +34,7 @@ type InTail struct {
 type Watcher struct {
 	watcher      *fsnotify.Watcher
 	watchingDir  map[string]bool
-	watchingFile map[string]chan fsnotify.Event
+	watchingFile map[string]chan fsnotify.FileEvent
 }
 
 func NewWatcher() (*Watcher, error) {
@@ -46,7 +46,7 @@ func NewWatcher() (*Watcher, error) {
 	w := &Watcher{
 		watcher:      watcher,
 		watchingDir:  make(map[string]bool),
-		watchingFile: make(map[string]chan fsnotify.Event),
+		watchingFile: make(map[string]chan fsnotify.FileEvent),
 	}
 	return w, nil
 }
@@ -65,31 +65,31 @@ func (w *Watcher) Run(c *Context) {
 		case <-c.ControlCh:
 			log.Println("[info] shutdown file watcher")
 			return
-		case ev := <-w.watcher.Events:
+		case ev := <-w.watcher.Event:
 			if eventCh, ok := w.watchingFile[ev.Name]; ok {
-				eventCh <- ev
+				eventCh <- *ev
 			}
-		case err := <-w.watcher.Errors:
+		case err := <-w.watcher.Error:
 			log.Println("[warning] watcher error", err)
 		}
 	}
 }
 
-func (w *Watcher) WatchFile(filename string) (chan fsnotify.Event, error) {
+func (w *Watcher) WatchFile(filename string) (chan fsnotify.FileEvent, error) {
 	parent := filepath.Dir(filename)
 	log.Println("[info] watching events of directory", parent)
 	if _, ok := w.watchingDir[parent]; ok { // already watching
-		ch := make(chan fsnotify.Event)
+		ch := make(chan fsnotify.FileEvent)
 		w.watchingFile[filename] = ch
 		return ch, nil
 	} else {
-		err := w.watcher.Add(parent)
+		err := w.watcher.Watch(parent)
 		if err != nil {
 			log.Println("[error] Couldn't watch event of", parent, err)
 			return nil, err
 		}
 		w.watchingDir[parent] = true
-		ch := make(chan fsnotify.Event)
+		ch := make(chan fsnotify.FileEvent)
 		w.watchingFile[filename] = ch
 		return ch, nil
 	}
@@ -242,15 +242,15 @@ func (t *InTail) watchFileEvent(f *File, c *Context) error {
 	case <-c.ControlCh:
 		return Signal{"shutdown in_tail: " + f.Path}
 	case ev := <-t.eventCh:
-		if ev.Op&fsnotify.Write == fsnotify.Write {
+		if ev.IsModify() {
 			break
 		}
-		if ev.Op&fsnotify.Remove == fsnotify.Remove || ev.Op&fsnotify.Rename == fsnotify.Rename {
+		if ev.IsDelete() || ev.IsRename() {
 			log.Println("[info] fsevent", ev.String())
 			f.tailAndSend(t.messageCh, t.monitorCh)
 			f.Close()
 			return errors.New(t.filename + " was closed")
-		} else if ev.Op&fsnotify.Create == fsnotify.Create {
+		} else if ev.IsCreate() {
 			return nil
 		}
 	case <-time.After(TailInterval):
